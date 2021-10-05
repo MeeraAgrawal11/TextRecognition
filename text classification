@@ -1,0 +1,97 @@
+def EAST_text_detector(path):
+	pred,coords = [],[]
+	image = cv2.imread(path)
+	
+	original_image_copy = image.copy()
+	temp = image.copy()
+	#Converting the image to gray scale
+	temp = cv2.cvtColor(temp, cv2.COLOR_BGR2GRAY)
+
+	(H, W) = image.shape[:2]
+	#Setting the new width and height and then determine the ratio in change for both the width and height
+	(newW, newH) = (512, 288)
+	rW = W / float(newW)
+	rH = H / float(newH)
+	#Resizing the image and taking the new image dimensions
+	image = cv2.resize(image, (newW, newH))
+	(H, W) = image.shape[:2]
+
+	#Setting the output layer set
+	layers = ["feature_fusion/Conv_7/Sigmoid", "feature_fusion/concat_3"]
+	
+	#print("Loading EAST text detector...")
+	east_net = cv2.dnn.readNet('/content/frozen_east_text_detection.pb')
+	#Constructing a blob from the image and then performing a forward pass of the model to obtain the two output layer sets
+	mean_color = np.average(image, axis=1)
+	mean_bgr = np.average(mean_color, axis=0)
+	mean_rgb = tuple([mean_bgr[2],mean_bgr[1],mean_bgr[0]])
+	blob = cv2.dnn.blobFromImage(image, 1.0, (W, H), mean_rgb, swapRB=True, crop=False)
+
+	start = time.time()
+	east_net.setInput(blob)
+
+	(scores, geometry) = east_net.forward(layers)
+	end = time.time()
+	
+	#Taking the number of rows and columns from the scores volume, then initializing our set of bounding box rectangles
+	#and corresponding confidence scores
+	(numRows, numCols) = scores.shape[2:4]
+	rects, confidences = [], []
+	for y in range(0, numRows):
+		#Extracting the scores (probabilities), followed by the geometrical data used to derive potential bounding box
+  	#coordinates that surround text
+		scoresData = scores[0, 0, y]
+		xData0 = geometry[0, 0, y]
+		xData1 = geometry[0, 1, y]
+		xData2 = geometry[0, 2, y]
+		xData3 = geometry[0, 3, y]
+		anglesData = geometry[0, 4, y]
+
+		for x in range(0, numCols):
+			#If our score does not have sufficient probability, ignore it
+			if scoresData[x] < 0.5:
+				continue
+			#Computing the offset factor as our resulting feature maps will be 4 times smaller than the input image
+			(offsetX, offsetY) = (x * 4.0, y * 4.0)
+			#Extracting the rotation angle for the prediction and then computing the sin and cosine
+			angle = anglesData[x]
+			cos = np.cos(angle)
+			sin = np.sin(angle)
+			#Using the geometry volume to derive the width and height of the bounding box
+			h = xData0[x] + xData2[x]
+			w = xData1[x] + xData3[x]
+			#Computing both the starting and ending (x, y)-coordinates for the text prediction bounding box
+			endX = int(offsetX + (cos * xData1[x]) + (sin * xData2[x]))
+			endY = int(offsetY - (sin * xData1[x]) + (cos * xData2[x]))
+			startX = int(endX - w)
+			startY = int(endY - h)
+			#Adding the bounding box coordinates and probability score to our respective lists
+			rects.append((startX, startY, endX, endY))
+			confidences.append(scoresData[x])
+
+	#Applying non-maxima suppression to suppress weak, overlapping bounding boxes
+	boxes = non_max_suppression(np.array(rects), probs=confidences)
+
+	for (startX, startY, endX, endY) in boxes:
+		#Scaling the bounding box coordinates based on the respective ratios
+		startX = int(startX * rW) - 2
+		startY = int(startY * rH) - 1
+		endX = int(endX * rW) + 2
+		endY = int(endY * rH) + 2
+
+		#If coords are out of the image dimension resizing it
+		if startX < 0:
+			startX = 0
+		if endX > original_image_copy.shape[1]:
+			endX = original_image_copy.shape[1]
+		if startY < 0:
+			startY = 0
+		if endY > original_image_copy.shape[0]:
+			endY = original_image_copy.shape[0]
+
+		#Drawing the bounding box on the image
+		cv2.rectangle(original_image_copy, (startX, startY), (endX, endY), (0, 255, 0), 2)
+		if endX > original_image_copy.shape[1] or endY > original_image_copy.shape[0]:
+			endX = original_image_copy.shape[1]
+			endY = original_image_copy.shape[0]
+		coords.append((startY, endY, startX, endX))
